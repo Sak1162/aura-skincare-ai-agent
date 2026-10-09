@@ -143,22 +143,289 @@ function App() {
      your current working version.
   ======================================================= */
 
-  const startCall = () => {
-    // KEEP YOUR EXISTING startCall IMPLEMENTATION HERE
-    setCalling(true);
-    setConnected(true);
-    setStatus("Listening");
+ 
+  const startCall = async () => {
+    if (calling) return;
+
+    let stream;
+
+    try {
+      setCalling(true);
+      setConnected(false);
+      setStatus("Connecting to Aria...");
+
+      // Request microphone permission from the user.
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+
+      mediaStreamRef.current = stream;
+
+      // Create the browser-to-backend WebSocket.
+      const socket = new WebSocket(WS_URL);
+      socketRef.current = socket;
+
+      socket.onopen = () => {
+        console.log("Browser WebSocket opened");
+        setStatus("Waiting for Aria...");
+      };
+
+      socket.onmessage = async (event) => {
+        let message;
+
+        try {
+          message = JSON.parse(event.data);
+        } catch {
+          console.error("Invalid WebSocket message:", event.data);
+          return;
+        }
+
+        if (message.type === "status" && message.state === "connected") {
+          console.log("Aria's Gemini session is ready");
+          setConnected(true);
+          setStatus("Listening");
+
+          // Do not send microphone audio until Gemini is ready.
+          if (processorRef.current) return;
+
+          const inputContext = new AudioContext({
+            sampleRate: 16000,
+          });
+          inputContextRef.current = inputContext;
+          await inputContext.resume();
+
+          const microphone = inputContext.createMediaStreamSource(stream);
+          sourceRef.current = microphone;
+
+          const processor = inputContext.createScriptProcessor(
+            4096,
+            1,
+            1
+          );
+          processorRef.current = processor;
+
+          // Prevent microphone audio from playing back through the speakers.
+          const silentGain = inputContext.createGain();
+          silentGain.gain.value = 0;
+          silentGainRef.current = silentGain;
+
+          processor.onaudioprocess = (audioEvent) => {
+            if (socket.readyState !== WebSocket.OPEN) return;
+
+            const input = audioEvent.inputBuffer.getChannelData(0);
+
+            const downsampled = downsampleBuffer(
+              input,
+              inputContext.sampleRate,
+              16000
+            );
+
+            const pcm = float32ToInt16(downsampled);
+
+            socket.send(
+              JSON.stringify({
+                type: "audio",
+                data: arrayBufferToBase64(pcm.buffer),
+              })
+            );
+          };
+
+          microphone.connect(processor);
+          processor.connect(silentGain);
+          silentGain.connect(inputContext.destination);
+        }
+
+        if (message.type === "transcript") {
+          setMessages((previous) => [
+            ...previous,
+            {
+              speaker: message.speaker,
+              text: message.text,
+            },
+          ]);
+        }
+
+        if (message.type === "audio" && message.data) {
+          try {
+            let audioContext = audioContextRef.current;
+
+            if (!audioContext || audioContext.state === "closed") {
+              audioContext = new AudioContext({
+                sampleRate: 24000,
+              });
+              audioContextRef.current = audioContext;
+              nextPlayTimeRef.current = 0;
+            }
+
+            await audioContext.resume();
+
+            const generation = audioGenerationRef.current;
+            const pcmBuffer = base64ToArrayBuffer(message.data);
+            const samples = int16ToFloat32(pcmBuffer);
+
+            const audioBuffer = audioContext.createBuffer(
+              1,
+              samples.length,
+              24000
+            );
+
+            audioBuffer.copyToChannel(samples, 0);
+
+            const source = audioContext.createBufferSource();
+            source.buffer = audioBuffer;
+            source.connect(audioContext.destination);
+
+            audioSourcesRef.current.add(source);
+
+            source.onended = () => {
+              audioSourcesRef.current.delete(source);
+            };
+
+            const startAt = Math.max(
+              audioContext.currentTime + 0.02,
+              nextPlayTimeRef.current
+            );
+
+            source.start(startAt);
+            nextPlayTimeRef.current =
+              startAt + audioBuffer.duration;
+          } catch (error) {
+            console.error("Audio playback failed:", error);
+          }
+        }
+
+        if (message.type === "interrupted") {
+          audioGenerationRef.current += 1;
+          nextPlayTimeRef.current = 0;
+
+          for (const source of audioSourcesRef.current) {
+            try {
+              source.stop();
+            } catch {}
+          }
+
+          audioSourcesRef.current.clear();
+        }
+
+        if (message.type === "tool_call") {
+          setToolStatus(`Looking up order ${message.order_id}...`);
+        }
+
+        if (message.type === "turn_complete") {
+          setToolStatus("");
+        }
+
+        if (message.type === "error") {
+          console.error("Voice agent error:", message.message);
+          setStatus(`Voice error: ${message.message}`);
+        }
+      };
+
+      socket.onerror = (event) => {
+        console.error("Browser WebSocket error:", event);
+        setStatus("Connection failed. Check the backend logs.");
+      };
+
+      socket.onclose = (event) => {
+        console.log("Browser WebSocket closed:", event.code, event.reason);
+        setConnected(false);
+        setCalling(false);
+
+        if (event.code !== 1000) {
+          setStatus("Connection closed. Please try again.");
+        } else {
+          setStatus("Ready to call");
+        }
+      };
+    } catch (error) {
+      console.error("Could not start voice call:", error);
+
+      stream?.getTracks().forEach((track) => track.stop());
+      mediaStreamRef.current = null;
+
+      setCalling(false);
+      setConnected(false);
+      setStatus(
+        error.name === "NotAllowedError"
+          ? "Microphone permission was denied."
+          : `Could not start call: ${error.message}`
+      );
+    }
   };
 
-  const endCall = () => {
-    // KEEP YOUR EXISTING endCall IMPLEMENTATION HERE
+  const endCall = async () => {
+    setStatus("Ending call...");
+
+    const socket = socketRef.current;
+    socketRef.current = null;
+
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      try {
+        socket.send(JSON.stringify({ type: "end" }));
+      } catch (error) {
+        console.error("Could not send end-call message:", error);
+      }
+    }
+
+    try {
+      processorRef.current?.disconnect();
+    } catch {}
+    processorRef.current = null;
+
+    try {
+      sourceRef.current?.disconnect();
+    } catch {}
+    sourceRef.current = null;
+
+    try {
+      silentGainRef.current?.disconnect();
+    } catch {}
+    silentGainRef.current = null;
+
+    mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+    mediaStreamRef.current = null;
+
+    for (const audioSource of audioSourcesRef.current) {
+      try {
+        audioSource.stop();
+      } catch {}
+    }
+    audioSourcesRef.current.clear();
+
+    audioGenerationRef.current += 1;
+    nextPlayTimeRef.current = 0;
+
+    const contexts = [
+      inputContextRef.current,
+      audioContextRef.current,
+    ];
+
+    inputContextRef.current = null;
+    audioContextRef.current = null;
+
+    await Promise.all(
+      contexts.map(async (context) => {
+        if (context && context.state !== "closed") {
+          try {
+            await context.close();
+          } catch {}
+        }
+      })
+    );
+
+    if (socket && socket.readyState !== WebSocket.CLOSED) {
+      socket.close(1000, "Call ended");
+    }
+
     setCalling(false);
-    setStatus("Ready to call");
-  };
-
-  const clearConversation = () => {
-    setMessages([]);
+    setConnected(false);
     setToolStatus("");
+    setStatus("Ready to call");
   };
 
   /* =======================================================
