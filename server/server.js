@@ -4,7 +4,8 @@ const http = require("http");
 const { WebSocketServer } = require("ws");
 require("dotenv").config();
 
-const { getOrderDetails } = require("./services/orderService");
+const { getOrderDetails, getAllOrders } = require("./services/orderService");
+const { generateCallSummary, generateFallbackSummary } = require("./services/summaryService");
 
 const PORT = process.env.PORT || 5000;
 
@@ -28,6 +29,10 @@ app.get("/", (req, res) => {
    Order Lookup API
 ----------------------------- */
 
+app.get("/api/orders", (req, res) => {
+  res.json(getAllOrders());
+});
+
 app.get("/api/orders/:orderId", (req, res) => {
   const result = getOrderDetails(req.params.orderId);
 
@@ -36,6 +41,22 @@ app.get("/api/orders/:orderId", (req, res) => {
   }
 
   res.json(result);
+});
+
+/* -----------------------------
+   Post-Call Summary API
+----------------------------- */
+
+app.post("/api/summarize-call", async (req, res) => {
+  try {
+    const { transcript, toolCalls } = req.body || {};
+    const summary = await generateCallSummary({ transcript, toolCalls });
+    res.json({ success: true, summary });
+  } catch (error) {
+    console.error("Error generating call summary:", error);
+    const fallback = generateFallbackSummary(req.body?.transcript, req.body?.toolCalls);
+    res.json({ success: true, summary: fallback });
+  }
 });
 
 /* -----------------------------
@@ -279,20 +300,30 @@ Returns:
 Returns are accepted within 7 days of delivery.
 Products must be unopened and unused.
 Products must be in their original packaging.
-Damaged or defective products must be reported within 48 hours
-with photos.
+Damaged or defective products must be reported within 48 hours with photos for replacement.
 
 Cancellation:
 Orders can only be cancelled while Processing.
 Shipped and Out for Delivery orders cannot be cancelled.
-Customers may refuse delivery at the doorstep.
+Customers may refuse delivery at the doorstep if they no longer want the package.
 
 COD:
 COD is available for orders up to ₹2,500.
 Customers can pay by cash or UPI at the doorstep.
 
-Do not promise something that the policy does not allow.
+SCENARIO HANDLING GUIDELINES:
+- Tracking ORD-101: Found via get_order_details. Out for Delivery with BlueDart, expected by 6 PM today.
+- Tracking ORD-102: Found via get_order_details. Delivered 14 days ago via Delhivery.
+- Tracking ORD-103: Found via get_order_details. Status is Processing (placed 3 hours ago). Eligible for cancellation.
+- Cancellation of ORD-103: Because the status is Processing, confirm that the cancellation can be completed.
+- Cancellation of Out for Delivery or Shipped orders (e.g., ORD-101): Politely explain that because the order is already out for delivery / dispatched, it cannot be cancelled in the system, but the customer can refuse delivery at the doorstep.
+- Return for opened products or items bought 20 days ago: Politely decline because products must be unopened, in original packaging, and returned within 7 days of delivery.
+- Nonexistent or invalid order IDs: When lookup fails, politely explain the order was not found and ask the customer to verify the order number.
+- Unrelated tasks (e.g. flight booking, weather, outside services): Politely clarify that you are Aria from Aura Skincare support and can only assist with Aura Skincare orders, products, and policies.
+- Vague questions: Ask a short, conversational clarifying question.
+- Strict accuracy: Never invent refunds, false tracking numbers, delivery guarantees, or policy exceptions.
 
+Do not promise something that the policy does not allow.
 If you don't know something, say you don't know.
 Never make something up.
 
@@ -477,6 +508,7 @@ Talk normally.
                       type: "tool_call",
                       tool: "get_order_details",
                       order_id: orderId,
+                      result,
                     })
                   );
                 }
@@ -550,6 +582,39 @@ Talk normally.
       try {
         const message =
           JSON.parse(rawMessage.toString());
+
+        /* -------------------------
+           Post-call summary request
+        ------------------------- */
+
+        if (message.type === "request_summary") {
+          try {
+            const summary = await generateCallSummary({
+              transcript: message.transcript,
+              toolCalls: message.toolCalls,
+            });
+            if (browserSocket.readyState === 1) {
+              browserSocket.send(
+                JSON.stringify({
+                  type: "call_summary",
+                  data: summary,
+                })
+              );
+            }
+          } catch (err) {
+            console.error("WebSocket summary error:", err);
+            const fallback = generateFallbackSummary(message.transcript, message.toolCalls);
+            if (browserSocket.readyState === 1) {
+              browserSocket.send(
+                JSON.stringify({
+                  type: "call_summary",
+                  data: fallback,
+                })
+              );
+            }
+          }
+          return;
+        }
 
         if (!geminiSession) {
           return;

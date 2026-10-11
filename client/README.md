@@ -1,16 +1,16 @@
-# React + Vite
+# Aura Skincare AI Voice Agent - Client
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+This directory contains the React 19 + Vite frontend client for the **Aura Skincare AI Voice Agent**.
 
-Currently, two official plugins are available:
+For full project documentation, architecture diagrams, testing guides, and the 4 mandatory assessment answers, please see the [Root README](../README.md).
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+### Scripts
+- `npm run dev`: Start Vite development server
+- `npm run build`: Build production bundle
+- `npm run lint`: Run Oxlint rules
+- `npm run preview`: Preview built production bundle
 
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.
+### Environment Variables
+Configure `.env` using `.env.example`:
+- `VITE_WS_URL`: WebSocket URL to voice backend (e.g. `ws://localhost:5000/ws`)
+- `VITE_API_URL`: HTTP API URL to voice backend (e.g. `http://localhost:5000`)
