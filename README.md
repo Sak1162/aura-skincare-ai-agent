@@ -41,7 +41,7 @@ When a call ends, the frontend sends the transcript and tool history to the back
 ### Prerequisites
 
 - Node.js and npm
-- A Google Gemini API key from [Google AI Studio](https://aistudio.google.com/)
+- A Google Gemini API key from [Google AI Studio]
 
 ### Configure environment variables
 
